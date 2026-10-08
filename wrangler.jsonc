@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hero-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    // HERO's GraphQL endpoint.
+    "HERO_URL": "https://login.hero-software.de/api/external/v7/graphql",
+    // Where this Worker is reachable (workers.dev or your own domain), without /mcp.
+    "PUBLIC_URL": "https://hero-mcp.CHANGE-ME.workers.dev"
+  },
+  // The HERO API key is a secret: npx wrangler secret put HERO_API_KEY
+  // Create the namespace with: npx wrangler kv namespace create OAUTH_KV, then paste its id here.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }],
+  "ratelimits": [{ "name": "LOGIN_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }]
+}
