@@ -13,8 +13,8 @@ const LIMIT_ARGS = ["first", "limit", "take", "per_page"];
 const OFFSET_ARGS = ["offset", "skip"];
 const ID_ARGS = ["ids", "id"];
 
-// Keeps one answer from flooding the model's context.
-const MAX_OUTPUT = 200_000;
+// Claude Code refuses tool results over 25,000 tokens by default; stay well below.
+const MAX_OUTPUT = 60_000;
 
 // Some clients send nested arguments as JSON strings; accept both.
 const jsonArg = <T extends z.ZodType>(schema: T) =>
@@ -28,7 +28,7 @@ const jsonArg = <T extends z.ZodType>(schema: T) =>
   }, schema);
 
 const ok = (data: unknown) => {
-  let text = typeof data === "string" ? data : JSON.stringify(data, null, 1);
+  let text = typeof data === "string" ? data : JSON.stringify(data);
   if (text.length > MAX_OUTPUT) text = `${text.slice(0, MAX_OUTPUT)}\n… [cut at ${MAX_OUTPUT} characters; ask for fewer items]`;
   return { content: [{ type: "text" as const, text }] };
 };
@@ -39,7 +39,8 @@ async function run(fn: () => Promise<unknown>) {
     return ok(await fn());
   } catch (e) {
     const msg = e instanceof InputError || e instanceof HeroError ? e.message : "Internal error";
-    if (!(e instanceof InputError)) console.error(e);
+    // Status only: HERO error bodies can contain customer data.
+    if (!(e instanceof InputError)) console.error("tool error", e instanceof HeroError ? e.status : e);
     return { isError: true, content: [{ type: "text" as const, text: msg }] };
   }
 }
@@ -108,15 +109,14 @@ async function list(
   }
   const first = argName(schema, field, LIMIT_ARGS);
   const skip = argName(schema, field, OFFSET_ARGS);
-  const serverPaging = !!first && (!!skip || offset === 0);
-  if (serverPaging) {
-    args[first] = limit;
-    if (skip) args[skip] = offset;
-  }
+  // Page on the server where HERO allows it; whatever it cannot skip is dropped here.
+  if (first) args[first] = skip ? limit : offset + limit;
+  if (skip) args[skip] = offset;
   const { query, variables } = buildQuery(schema, field, args, spec);
   const result = (await hero.query(query, variables))[field];
-  let items: unknown[] = Array.isArray(result) ? result : result == null ? [] : [result];
-  if (!serverPaging) items = items.slice(offset, offset + limit);
+  const all: unknown[] = Array.isArray(result) ? result : result == null ? [] : [result];
+  const from = skip ? 0 : offset;
+  const items = all.slice(from, from + limit);
   return { items, returned: items.length, limit, offset };
 }
 

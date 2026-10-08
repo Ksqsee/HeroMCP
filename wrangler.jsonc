@@ -14,5 +14,9 @@
   // The HERO API key is a secret: npx wrangler secret put HERO_API_KEY
   // Create the namespace with: npx wrangler kv namespace create OAUTH_KV, then paste its id here.
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }],
-  "ratelimits": [{ "name": "LOGIN_LIMIT", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }]
+  // Rate-limit namespace ids are shared across the whole Cloudflare account; keep them unique.
+  "ratelimits": [
+    { "name": "LOGIN_LIMIT", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
+    { "name": "REGISTER_LIMIT", "namespace_id": "2002", "simple": { "limit": 20, "period": 60 } }
+  ]
 }

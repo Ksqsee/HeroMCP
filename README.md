@@ -36,7 +36,8 @@ The tools read HERO's schema at runtime. They fetch every plain field of each
 object, use HERO's own paging and search arguments where they exist, and pass any
 extra filter through `arguments` (`describe_schema` lists the filters each query
 accepts). User input always travels as GraphQL variables, never pasted into the
-query text.
+query text. One answer is capped at 60,000 characters, which fits what Claude
+accepts from a tool. If a list is cut, ask for fewer items.
 
 ## Access
 
@@ -49,7 +50,10 @@ colleague signs in with a **personal access code** instead:
   that are already open.
 - Only Claude's own callback addresses can complete a sign-in, so a look-alike app
   cannot phish a code.
-- Sign-in attempts are rate-limited per IP address.
+- Sign-in attempts, client registrations and login-page opens are rate-limited
+  per IP address, so nobody can guess codes or fill the Worker's storage.
+- The API key is only ever sent to `HERO_URL`, never along a redirect, and logs
+  hold only HTTP status codes, never HERO's answers.
 
 ## Deploy
 

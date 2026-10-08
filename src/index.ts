@@ -10,6 +10,7 @@ export interface Env {
   HERO_API_KEY: string;
   PUBLIC_URL: string;
   LOGIN_LIMIT: RateLimit;
+  REGISTER_LIMIT: RateLimit;
 }
 
 // Only Claude may receive sign-ins, so nobody can register a look-alike app
@@ -114,7 +115,7 @@ const mcp = {
   },
 };
 
-export default new OAuthProvider<Env>({
+const provider = new OAuthProvider<Env>({
   apiRoute: "/mcp",
   apiHandler: mcp as any,
   defaultHandler: {
@@ -139,3 +140,15 @@ export default new OAuthProvider<Env>({
       throw new OAuthError("invalid_grant", { description: "Access revoked" });
   },
 });
+
+// Anonymous endpoints that write to KV (client registration, opening the login page)
+// get a per-IP limit, so nobody can fill storage or burn the daily KV write quota.
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    const writes = (pathname === "/register" && request.method === "POST") || (pathname === "/authorize" && request.method === "GET");
+    if (writes && !(await env.REGISTER_LIMIT.limit({ key: request.headers.get("CF-Connecting-IP") ?? "unknown" })).success)
+      return new Response("Too many requests", { status: 429 });
+    return provider.fetch(request, env, ctx);
+  },
+};

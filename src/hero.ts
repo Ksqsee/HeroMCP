@@ -104,6 +104,7 @@ export class Hero {
     assertReadOnly(query);
     const resp = await fetch(this.url, {
       method: "POST",
+      redirect: "manual", // following a redirect would send the API key (which can also write) elsewhere
       headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({ query, variables }),
     });

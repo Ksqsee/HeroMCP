@@ -21,7 +21,7 @@ const call = (path: string, init?: RequestInit) => (exports as any).default.fetc
 async function register(redirect = CALLBACK) {
   return call("/register", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": crypto.randomUUID() },
     body: JSON.stringify({ redirect_uris: [redirect], token_endpoint_auth_method: "none", client_name: "Claude" }),
   });
 }
@@ -46,7 +46,7 @@ async function openLogin() {
     state: "xyz",
     resource: `${ORIGIN}/mcp`,
   });
-  const page = await call(`/authorize?${qs}`);
+  const page = await call(`/authorize?${qs}`, { headers: { "CF-Connecting-IP": crypto.randomUUID() } });
   expect(page.status).toBe(200);
   const html = await page.text();
   const handle = /name="handle" value="([^"]+)"/.exec(html)![1];
@@ -170,6 +170,33 @@ describe("sign-in", () => {
   });
 });
 
+describe("abuse", () => {
+  it("anonymous client registration is rate-limited per IP", async () => {
+    const statuses = [];
+    for (let i = 0; i < 25; i++)
+      statuses.push(
+        (
+          await call("/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.9" },
+            body: JSON.stringify({ redirect_uris: [CALLBACK], token_endpoint_auth_method: "none" }),
+          })
+        ).status,
+      );
+    expect(statuses).toContain(429);
+  });
+
+  it("the API key is never sent along a redirect, and HERO error bodies stay out of the logs", async () => {
+    const { access_token } = await signIn();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    hero.respond = () => new Response("Kunde Müller, Rechnung R-1 fehlgeschlagen", { status: 500 });
+    const r = await tool(access_token, "graphql_query", { query: "{ contacts { id } }" });
+    expect(r.isError).toBe(true);
+    expect(hero.calls.every((c) => c.redirect === "manual")).toBe(true);
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("Müller");
+  });
+});
+
 describe("tools", () => {
   it("status uses the API key and reports the person", async () => {
     const { access_token } = await signIn();
@@ -201,11 +228,11 @@ describe("tools", () => {
     expect(data.histories[0].custom_title).toBe("Anruf");
   });
 
-  it("lists without server paging are sliced locally", async () => {
+  it("lists with a page size but no offset argument fetch only what the page needs", async () => {
     const { access_token } = await signIn();
     const { data } = await tool(access_token, "list_calendar_events", { limit: 2, offset: 1, arguments: { start: "2026-02-01" } });
     expect(data.items.map((e: any) => e.id)).toEqual([2, 3]);
-    expect(lastQuery().variables).toEqual({ start: "2026-02-01" });
+    expect(lastQuery().variables).toEqual({ start: "2026-02-01", first: 3 });
   });
 
   it("unknown arguments and missing search fail with a helpful message", async () => {

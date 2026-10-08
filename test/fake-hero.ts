@@ -5,8 +5,10 @@ export const HERO = "https://hero.test/graphql";
 export const KEY = "hero-key";
 
 export interface FakeState {
-  calls: { url: string; auth: string | null; query: string; variables: Record<string, unknown> }[];
+  calls: { url: string; auth: string | null; redirect: string | undefined; query: string; variables: Record<string, unknown> }[];
   mutated: boolean;
+  /** When set, HERO answers every request with this response instead. */
+  respond?: () => Response;
 }
 
 export const newState = (): FakeState => ({ calls: [], mutated: false });
@@ -16,7 +18,7 @@ const schema = buildSchema(`
     contacts(ids: [Int], search: String, first: Int, offset: Int): [Contact]
     project_matches(ids: [Int], search: String, status_code: Int, first: Int, offset: Int): [ProjectMatch]
     customer_documents(project_match_id: Int, first: Int, offset: Int): [CustomerDocument]
-    calendar_events(start: String): [CalendarEvent]
+    calendar_events(start: String, first: Int): [CalendarEvent]
     supply_product_versions(search: String, first: Int, offset: Int): [Product]
   }
   type Mutation {
@@ -59,7 +61,7 @@ const root = (state: FakeState) => ({
   contacts: (a: any) => page([anna].filter((c) => (!a.ids || a.ids.includes(c.id)) && (!a.search || c.last_name.includes(a.search))), a),
   project_matches: (a: any) => page(projects.filter((p) => !a.ids || a.ids.includes(p.id)), a),
   customer_documents: (a: any) => page(docs, a),
-  calendar_events: () => [1, 2, 3, 4].map((i) => ({ id: i, title: `Termin ${i}`, start: `2026-02-0${i}` })),
+  calendar_events: (a: any) => page([1, 2, 3, 4].map((i) => ({ id: i, title: `Termin ${i}`, start: `2026-02-0${i}` })), a),
   supply_product_versions: (a: any) => page([{ id: 1, name: "Rohr", price: 2.5 }], a),
   create_contact: () => ((state.mutated = true), anna),
   delete_contact: () => ((state.mutated = true), true),
@@ -70,7 +72,8 @@ export function fakeHero(state: FakeState) {
     const req = new Request(input, init);
     if (req.url !== HERO) return new Response("not reachable", { status: 599 });
     const body = (await req.json()) as { query: string; variables?: Record<string, unknown> };
-    state.calls.push({ url: req.url, auth: req.headers.get("Authorization"), query: body.query, variables: body.variables ?? {} });
+    state.calls.push({ url: req.url, auth: req.headers.get("Authorization"), redirect: init?.redirect, query: body.query, variables: body.variables ?? {} });
+    if (state.respond) return state.respond();
     if (req.headers.get("Authorization") !== `Bearer ${KEY}`) return new Response("unauthorized", { status: 401 });
     const result = await graphql({ schema, source: body.query, variableValues: body.variables, rootValue: root(state) });
     return Response.json(result);
