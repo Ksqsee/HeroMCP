@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { registerBusinessTools } from "./business";
 import { argName, buildQuery, Hero, HeroError, InputError, type Spec, typeString } from "./hero";
 
 export interface Props {
@@ -69,19 +70,37 @@ const LISTS: ListTool[] = [
     tool: "list_documents",
     field: "customer_documents",
     description: "List customer documents (offers, order confirmations, invoices, …) with a link to the file.",
-    spec: { file_upload: {} },
+    spec: { file_upload: {}, document_type: {}, customer_document_booking: { payments: {} } },
   },
   {
     tool: "list_calendar_events",
     field: "calendar_events",
-    description: "List calendar appointments.",
-    spec: {},
+    description: "List calendar appointments. start/end need an ISO time WITH offset (e.g. 2026-11-03T00:00:00+01:00).",
+    spec: { category: {}, project_match: {}, partners: {} },
   },
   {
     tool: "list_products",
     field: "supply_product_versions",
-    description: "List articles from the product master data (Artikelstamm).",
-    spec: {},
+    description: "List articles from the product master data (Artikelstamm) with purchase (base_price) and sales price (list_price) and stock.",
+    spec: { base_data: {}, stock_materials: {} },
+  },
+  {
+    tool: "list_receipts",
+    field: "receipts",
+    description: "List incoming receipts and supplier invoices (Eingangsbelege) with amount, due date and paid sum. Use get_receipt for one receipt with its file.",
+    spec: { customer: { address: {} } },
+  },
+  {
+    tool: "list_time_entries",
+    field: "tracking_times",
+    description: "List tracked working times (duration_in_seconds), e.g. arguments {project_match_id, start, end, show_all_partners: true}.",
+    spec: { partner: {}, tracking_times_category: {} },
+  },
+  {
+    tool: "list_jobs",
+    field: "field_service_jobs",
+    description: "List field service jobs (Wartung, Reparatur, Notdienst). Status codes: 0 offen, 100 zugewiesen, 500 erledigt (arguments {status: [0]}).",
+    spec: { customer: {}, address: {}, partners: {} },
   },
 ];
 
@@ -133,9 +152,9 @@ async function getOne(hero: Hero, field: string, id: string, spec: Spec) {
 
 const idArg = z.string().regex(/^[\w-]{1,64}$/, "id must be a HERO id as returned by a list tool");
 
-export function buildServer(url: string, apiKey: string, props: Props): McpServer {
+export function buildServer(url: string, apiKey: string, props: Props, kv: KVNamespace): McpServer {
   const hero = new Hero(url, apiKey);
-  const server = new McpServer({ name: "hero", version: "1.0.0" });
+  const server = new McpServer({ name: "hero", version: "2.0.0" });
   const readOnly = { readOnlyHint: true, openWorldHint: false };
 
   server.registerTool(
@@ -152,7 +171,7 @@ export function buildServer(url: string, apiKey: string, props: Props): McpServe
     server.registerTool(
       l.tool,
       {
-        description: `${l.description} Read-only. Results come in pages: use limit and offset.`,
+        description: `${l.description} Results come in pages: use limit and offset.`,
         inputSchema: listInput,
         annotations: readOnly,
       },
@@ -190,6 +209,29 @@ export function buildServer(url: string, apiKey: string, props: Props): McpServe
         }),
       ),
   );
+
+  server.registerTool(
+    "get_receipt",
+    {
+      description: "Get one incoming receipt / supplier invoice (Eingangsbeleg) with supplier and attached files. Use file_link with a file uuid to download it.",
+      inputSchema: { id: idArg },
+      annotations: readOnly,
+    },
+    ({ id }) =>
+      run(() =>
+        getOne(hero, "receipts", id, {
+          customer: { address: {} },
+          file_upload: {},
+          file_uploads: {},
+          positions: {},
+          items: {},
+          receipt_positions: {},
+          project_match: {},
+        }),
+      ),
+  );
+
+  registerBusinessTools(server, { hero, kv, user: props.user, url }, run);
 
   server.registerTool(
     "describe_schema",

@@ -46,7 +46,7 @@ button{width:100%;padding:.7rem;font-size:1rem;background:#1d4ed8;color:#fff;bor
 </style></head><body>
 <form method="post">
 <h1>HERO für Claude</h1>
-<p>Geben Sie Ihren persönlichen Zugangscode ein. Claude kann danach Kontakte, Projekte und Dokumente in HERO lesen, aber nichts ändern oder löschen.</p>
+<p>Geben Sie Ihren persönlichen Zugangscode ein. Claude kann danach in HERO lesen und Neues anlegen (Kunden, Projekte, Entwürfe, Termine, Zeiten, Zahlungen), aber nichts Bestehendes ändern oder löschen.</p>
 ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ""}
 <input type="hidden" name="handle" value="${esc(handle)}">
 <label for="c">Zugangscode</label>
@@ -111,7 +111,7 @@ const mcp = {
     // Removing a person's code ends their access, even for tokens already issued.
     if (!(await userFor(env, ctx.props.codeHash)))
       return Response.json({ error: "invalid_token", error_description: "Access revoked" }, { status: 401 });
-    return createMcpHandler(() => buildServer(env.HERO_URL, env.HERO_API_KEY, ctx.props))(request, env, ctx);
+    return createMcpHandler(() => buildServer(env.HERO_URL, env.HERO_API_KEY, ctx.props, env.OAUTH_KV))(request, env, ctx);
   },
 };
 
