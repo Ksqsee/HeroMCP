@@ -1,43 +1,66 @@
 # hero-mcp
 
-A **read-only** MCP server that lets Claude look things up in
-[HERO Software](https://hero-software.de) (Handwerkersoftware): contacts, projects,
-documents, appointments and articles. It runs as a Cloudflare Worker, and colleagues
-connect it in Claude as a connector. It is built the same way as
-[DocuwareMCP](https://github.com/Ksqsee/DocuwareMCP)'s Worker.
+An MCP server that lets Claude work in [HERO Software](https://hero-software.de)
+(Handwerkersoftware): look things up, and **create** customers, projects, offers,
+invoices, appointments, tasks, time entries and payments. It runs as a Cloudflare
+Worker on HERO's newest GraphQL API (**v9**), and colleagues connect it in Claude as
+a connector.
 
-**Nothing can be changed or deleted.** The server has no tools that write. Every
-request it sends to HERO is checked first, and anything that is not a GraphQL
-`query` (any `mutation` or `subscription`) is rejected before it leaves the Worker.
+**Claude can create, but never edit or delete.** Every write passes one guard
+(`assertCreateOnly` in `src/hero.ts`): only an allowlist of HERO *create* mutations
+gets through, `update_task` / `update_tracking_time` only without an id (HERO uses
+them to create), and `graphql_query` stays read-only.
 
 ```
-Claude (claude.ai / Desktop)  ──HTTPS + OAuth──▶  hero-mcp Worker (login + read-only tools)
+Claude (claude.ai / Desktop)  ──HTTPS + OAuth──▶  hero-mcp Worker (login + tools)
                                                      │  company HERO API key (secret)
                                                      ▼
-                                     login.hero-software.de/api/external/v7/graphql
+                                     login.hero-software.de/api/external/v9/graphql
 ```
 
 ## Tools
 
+**Read**
+
 | Tool | What it does |
 | --- | --- |
 | `status` | Checks the HERO connection and shows who is signed in |
-| `list_contacts` | Contacts with address (`search`, `limit`, `offset`) |
-| `get_contact` | One contact by id |
-| `list_projects` | Projects (`project_matches`) with customer, address, trade and status |
-| `get_project` | One project with its documents (file links) and logbook entries |
-| `list_documents` | Customer documents (offers, invoices, …) with file links |
-| `list_calendar_events` | Appointments |
-| `list_products` | Article master data (`supply_product_versions`) |
-| `describe_schema` | Shows the HERO data model: the read queries, their arguments and each type's fields |
-| `graphql_query` | Any read-only GraphQL query, for things the tools above don't cover |
+| `search` | One search over contacts, projects, documents and jobs |
+| `list_contacts`, `get_contact` | Contacts with address |
+| `list_projects`, `get_project` | Projects with customer, status, documents (file links) and logbook |
+| `list_documents` | Offers, invoices, … with type, file and payment booking |
+| `open_items` | All unpaid invoices with remaining amount and days overdue, paged through completely |
+| `payment_status` | Paid / open, remaining amount and payments of one invoice |
+| `list_receipts`, `get_receipt` | Incoming receipts and supplier invoices (Eingangsbelege) with their files |
+| `file_link` | Time-limited download link for a document PDF or any file |
+| `list_calendar_events`, `list_jobs`, `get_checklists`, `list_time_entries`, `list_products` | Appointments, field service jobs, checklist answers, tracked time, articles |
+| `describe_schema`, `graphql_query` | The live HERO data model, and any read-only query |
 
-The tools read HERO's schema at runtime. They fetch every plain field of each
-object, use HERO's own paging and search arguments where they exist, and pass any
-extra filter through `arguments` (`describe_schema` lists the filters each query
-accepts). User input always travels as GraphQL variables, never pasted into the
-query text. One answer is capped at 60,000 characters, which fits what Claude
-accepts from a tool. If a list is cut, ask for fewer items.
+**Create** (never edit, never delete)
+
+| Tool | What it creates |
+| --- | --- |
+| `create_customer` | Contact with address (HERO returns an existing one instead of a duplicate) |
+| `create_project` | Project for a customer |
+| `create_offer`, `create_document`, `create_invoice_from_offer`, `create_timesheet` | Offers, invoices (incl. Abschlag/Schluss), credit notes, … **as drafts by default** |
+| `create_job`, `create_checklist` | Field service job and checklist |
+| `create_article` | Article with purchase *and* sales price |
+| `schedule_appointment`, `add_task`, `log_time`, `add_logbook_note` | Appointment, task, time entry, logbook note (signed "via Claude (name)") |
+| `record_payment` | Incoming payment on an invoice (refuses more than the open amount) |
+
+### Safety rules for writes
+
+- **Drafts first.** Documents are created as drafts (`publish: false`). A person
+  checks and finalises them in HERO. `publish: true` exists, but only for when that
+  is explicitly wanted, because a final invoice can only be fixed with a Storno.
+- **No duplicates.** The same tool with the same arguments within 15 minutes returns
+  the first result instead of creating a second invoice. If the outcome of a write
+  is unknown (timeout, HERO 5xx), repeats are blocked until someone checked HERO.
+  `repeat: true` creates a second one on purpose.
+- **Checked input.** Units are mapped to HERO's list ("pauschal" → "Satz"), German
+  postcodes must have 5 digits (HERO reads 4 digits as Switzerland), times need an
+  offset, and sales prices below purchase prices are refused.
+- **Audit.** The Worker logs which person used which write tool, never customer data.
 
 ## Access
 
@@ -95,7 +118,14 @@ npm test        # Worker tests against an in-memory fake of HERO's GraphQL API
 
 - Everything Claude reads from HERO is sent to Anthropic. Whoever signs in sees
   everything the company's API key can read.
-- The field names are taken from HERO's
-  [GraphQL guide](https://hero-software.de/api-doku/graphql-guide). If HERO
-  renames something, the list tools skip the missing fields instead of failing.
-  `describe_schema` and `graphql_query` always show the live model.
+- HERO's public [GraphQL guide](https://hero-software.de/api-doku/graphql-guide)
+  still shows v7; v9 is the newest version the endpoint serves (v10+ return 404).
+  To change versions, edit `HERO_URL` in `wrangler.jsonc`.
+- The list tools read HERO's schema at runtime and skip fields that don't exist.
+  The business tools use fixed v9 queries; if HERO renames a field, the tool
+  reports HERO's error and nothing is created. `describe_schema` shows the live model.
+- The tests run against an in-memory fake of HERO. Before relying on the write
+  tools, try each one once against a HERO test account (or a test project) and
+  check the result in HERO.
+- File upload is not included: HERO's API can only receive files through the Lead
+  API, which creates a new project for every upload.

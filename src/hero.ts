@@ -81,6 +81,60 @@ export function assertReadOnly(source: string): void {
   }
 }
 
+/**
+ * The only mutations this server may send. Every one of them creates something new;
+ * nothing that edits, cancels or deletes existing data is on the list.
+ */
+export const CREATE_MUTATIONS = new Set([
+  "create_contact",
+  "create_project_match",
+  "create_document",
+  "create_field_service_job",
+  "create_field_service_checklist",
+  "create_supply_product_version",
+  "create_calendar_event",
+  "create_payment",
+  "add_logbook_entry",
+  // HERO has no create_task / create_tracking_time: update_* without an id creates.
+  // They are allowed only in that form, see UPSERTS.
+  "update_task",
+  "update_tracking_time",
+]);
+
+/** Upsert mutations: argument that carries the record, which must not name an existing one. */
+const UPSERTS: Record<string, string> = { update_task: "task", update_tracking_time: "tracking_time" };
+const ID_KEYS = ["id", "uuid"];
+
+/**
+ * Throw unless the document is a single mutation whose every root field creates
+ * something. Every write this server sends to HERO passes through here, so no tool
+ * can edit or delete existing data, whatever arguments a caller sends.
+ */
+export function assertCreateOnly(source: string, variables: Record<string, unknown>): void {
+  let doc;
+  try {
+    doc = parse(source);
+  } catch (e) {
+    throw new InputError(`Invalid GraphQL: ${(e as Error).message}`);
+  }
+  const ops = doc.definitions.filter((d) => d.kind === Kind.OPERATION_DEFINITION);
+  if (ops.length !== 1 || doc.definitions.length !== 1 || ops[0].kind !== Kind.OPERATION_DEFINITION || ops[0].operation !== "mutation")
+    throw new InputError("Write requests must be exactly one mutation.");
+  for (const sel of ops[0].selectionSet.selections) {
+    if (sel.kind !== Kind.FIELD) throw new InputError("Fragments are not allowed at the root of a mutation.");
+    const name = sel.name.value;
+    if (!CREATE_MUTATIONS.has(name)) throw new InputError(`Mutation "${name}" is blocked: this server only creates, it never edits or deletes.`);
+    const recordArg = UPSERTS[name];
+    if (!recordArg) continue;
+    const arg = sel.arguments?.find((a) => a.name.value === recordArg);
+    if (!arg || arg.value.kind !== Kind.VARIABLE) throw new InputError(`"${name}" must pass "${recordArg}" as a variable.`);
+    const record = variables[arg.value.name.value];
+    if (!record || typeof record !== "object") throw new InputError(`"${name}" needs a "${recordArg}" object.`);
+    for (const k of ID_KEYS)
+      if ((record as Record<string, unknown>)[k] != null) throw new InputError(`"${name}" with an ${k} would edit an existing record; blocked.`);
+  }
+}
+
 export function namedType(ref: TypeRef): string {
   let r: TypeRef | null = ref;
   while (r && !r.name) r = r.ofType;
@@ -102,6 +156,16 @@ export class Hero {
 
   async query(query: string, variables: Record<string, unknown> = {}): Promise<Record<string, any>> {
     assertReadOnly(query);
+    return this.send(query, variables);
+  }
+
+  /** Create something in HERO. Only the mutations in CREATE_MUTATIONS get through. */
+  async mutate(mutation: string, variables: Record<string, unknown> = {}): Promise<Record<string, any>> {
+    assertCreateOnly(mutation, variables);
+    return this.send(mutation, variables);
+  }
+
+  private async send(query: string, variables: Record<string, unknown>): Promise<Record<string, any>> {
     const resp = await fetch(this.url, {
       method: "POST",
       redirect: "manual", // following a redirect would send the API key (which can also write) elsewhere
@@ -111,7 +175,8 @@ export class Hero {
     if (resp.status === 401 || resp.status === 403) throw new HeroError("HERO rejected the API key (check HERO_API_KEY).", resp.status);
     if (!resp.ok) throw new HeroError(`HERO HTTP ${resp.status}: ${(await resp.text()).slice(0, 300)}`, resp.status);
     const body = (await resp.json()) as { data?: Record<string, any>; errors?: { message: string }[] };
-    if (body.errors?.length) throw new HeroError(`HERO: ${body.errors.map((e) => e.message).join("; ")}`);
+    // status 422 marks "HERO answered and refused": nothing was created, a retry is safe.
+    if (body.errors?.length) throw new HeroError(`HERO: ${body.errors.map((e) => e.message).join("; ")}`, 422);
     return body.data ?? {};
   }
 

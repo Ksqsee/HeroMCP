@@ -110,19 +110,15 @@ describe("sign-in", () => {
     expect((await mcp(null, "tools/list")).status).toBe(401);
     const list = await mcp(access_token, "tools/list");
     const tools = list.body.result.tools;
-    expect(tools.map((t: any) => t.name).sort()).toEqual([
-      "describe_schema",
-      "get_contact",
-      "get_project",
-      "graphql_query",
-      "list_calendar_events",
-      "list_contacts",
-      "list_documents",
-      "list_products",
-      "list_projects",
-      "status",
-    ]);
-    expect(tools.every((t: any) => t.annotations?.readOnlyHint === true)).toBe(true);
+    const names = tools.map((t: any) => t.name);
+    for (const n of ["status", "search", "open_items", "list_receipts", "get_receipt", "file_link", "create_offer", "create_document", "record_payment", "graphql_query"])
+      expect(names).toContain(n);
+    // No tool may edit or delete: the names say so, and every writer declares itself non-destructive.
+    expect(names.filter((n: string) => /delete|remove|update|edit|cancel|storno/i.test(n))).toEqual([]);
+    for (const t of tools) {
+      if (/^(create_|add_|log_|record_|schedule_)/.test(t.name)) expect(t.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+      else expect(t.annotations?.readOnlyHint).toBe(true);
+    }
   });
 
   it("wrong access code shows the form again and the same form still works afterwards", async () => {
@@ -285,5 +281,111 @@ describe("tools", () => {
     const r = await tool(access_token, "get_contact", { id: "7) { id } } mutation { delete_contact(id: 7" });
     expect(r.isError).toBe(true);
     expect(hero.mutated).toBe(false);
+  });
+});
+
+describe("writes", () => {
+  it("only create mutations pass the guard; edits and deletes never reach HERO", async () => {
+    const { assertCreateOnly } = await import("../src/hero");
+    expect(() => assertCreateOnly("mutation ($i: X) { create_document(input: $i, actions: []) { customer_document_id } }", {})).not.toThrow();
+    for (const [q, v] of [
+      ["mutation { delete_contact(id: 7) }", {}],
+      ["mutation { update_customer_document(id: 7) }", {}],
+      ["mutation { create_contact { id } delete_contact(id: 7) }", {}],
+      ["mutation A { create_contact { id } } mutation B { delete_contact(id: 1) }", {}],
+      ["query { contacts { id } }", {}],
+      ["mutation ($t: TaskInput) { update_task(task: $t) { id } }", { t: { id: 5, title: "x" } }],
+      ["mutation ($t: X) { update_tracking_time(tracking_time: $t) { id } }", { t: { uuid: "abc" } }],
+      ['mutation { update_task(task: { id: 5, title: "x" }) { id } }', {}],
+      ["mutation { ...F } fragment F on Mutation { delete_contact(id: 1) }", {}],
+    ] as [string, Record<string, unknown>][])
+      expect(() => assertCreateOnly(q, v), q).toThrow();
+  });
+
+  it("create_offer makes a draft by default, with the customer as recipient and HERO units", async () => {
+    const { access_token } = await signIn();
+    const r = await tool(access_token, "create_offer", {
+      project_match_id: 2,
+      positions: [{ name: "Waschtisch montieren", unit: "pauschal", quantity: 1, unit_price: 240 }],
+    });
+    expect(r.isError).toBe(false);
+    expect(r.data).toMatchObject({ document_id: 5000, entwurf: true });
+    const made = hero.created.find((c) => c.name === "create_document")!;
+    expect(made.variables).toMatchObject({ input: { document_type_id: 21, project_match_id: 2, publish: false } });
+    const actions = made.variables.actions as any[];
+    expect(actions[0].set_recipient).toMatchObject({ last_name: "Muster", city: "Köln" });
+    expect(actions[1].add_product_position).toMatchObject({ unit_type: "Satz", net_price: 240, vat_percent: 19 });
+    expect(hero.mutated).toBe(false);
+  });
+
+  it("the same write twice creates one document, unless repeat is set on purpose", async () => {
+    const { access_token } = await signIn();
+    const args = { project_match_id: 3, doc_type: "rechnung", positions: [{ name: "Abschlag 1", unit: "Stk", quantity: 1, unit_price: 1000 }] };
+    await tool(access_token, "create_document", args);
+    const second = await tool(access_token, "create_document", args);
+    expect(second.data.bereits_angelegt).toBe(true);
+    expect(hero.created.filter((c) => c.name === "create_document")).toHaveLength(1);
+    await tool(access_token, "create_document", { ...args, repeat: true });
+    expect(hero.created.filter((c) => c.name === "create_document")).toHaveLength(2);
+  });
+
+  it("a HERO refusal does not block a corrected retry", async () => {
+    const { access_token } = await signIn();
+    const bad = await tool(access_token, "create_document", { project_match_id: 1, doc_type: "mahnung", positions: [{ name: "x", unit: "Stk", quantity: 1, unit_price: 1 }] });
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toContain("Verfügbar: Angebot, Rechnung, Allgemein");
+    const badUnit = await tool(access_token, "create_document", { project_match_id: 1, doc_type: "rechnung", positions: [{ name: "x", unit: "Eimer", quantity: 1, unit_price: 1 }] });
+    expect(badUnit.text).toContain("Erlaubt:");
+    expect(hero.created).toHaveLength(0);
+  });
+
+  it("add_task creates, and cannot be turned into an edit", async () => {
+    const { access_token } = await signIn();
+    const r = await tool(access_token, "add_task", { project_match_id: 1, title: "Material bestellen", due: "2026-11-03T08:00:00+01:00" });
+    expect(r.data).toMatchObject({ id: 77 });
+    expect((hero.created[0].variables.task as any).id).toBeUndefined();
+    const sneaky = await tool(access_token, "add_task", { project_match_id: 1, title: "x", due: "2026-11-03T08:00:00+01:00", id: 5 } as any);
+    expect(hero.created.filter((c) => (c.variables.task as any)?.id)).toHaveLength(0);
+    expect(sneaky.isError || sneaky.data?.id === 77).toBe(true);
+  });
+
+  it("record_payment refuses more than the open amount and does not pay drafts", async () => {
+    const { access_token } = await signIn();
+    const over = await tool(access_token, "record_payment", { document_id: 1000, amount: 500, date: "2026-10-26" });
+    expect(over.isError).toBe(true);
+    expect(over.text).toContain("offene Restbetrag 100");
+    const draft = await tool(access_token, "record_payment", { document_id: 5000, amount: 10, date: "2026-10-26" });
+    expect(draft.isError).toBe(true);
+    const ok = await tool(access_token, "record_payment", { document_id: 1000, amount: 100, date: "2026-10-26" });
+    expect(ok.isError).toBe(false);
+    expect(hero.created.filter((c) => c.name === "create_payment")).toHaveLength(1);
+  });
+
+  it("graphql_query still cannot write, not even allowed create mutations", async () => {
+    const { access_token } = await signIn();
+    const r = await tool(access_token, "graphql_query", { query: 'mutation { create_document(input: {}, actions: []) { customer_document_id } }' });
+    expect(r.isError).toBe(true);
+    expect(hero.created).toHaveLength(0);
+  });
+});
+
+describe("v9 reads", () => {
+  it("open_items pages through every invoice, not just the newest 200", async () => {
+    const { access_token } = await signIn();
+    const { data } = await tool(access_token, "open_items", { as_of: "2026-10-26" });
+    expect(data.vollstaendig).toBe(true);
+    expect(data.anzahl).toBe(150);
+    expect(data.summe).toBe(15000);
+    expect(data.posten[0].tage_ueberfaellig).toBeGreaterThan(200);
+    const pages = hero.calls.filter((c) => c.query.includes("customer_document_booking") && c.variables.t);
+    expect(pages.map((c) => c.variables.o)).toEqual([0, 200, 400]);
+  });
+
+  it("receipts (Eingangsbelege) can be listed and read with their file", async () => {
+    const { access_token } = await signIn();
+    const list = await tool(access_token, "list_receipts", {});
+    expect(list.data.items[0]).toMatchObject({ number: "ER-3", customer: { last_name: "Muster" } });
+    const one = await tool(access_token, "get_receipt", { id: "3" });
+    expect(one.data.file_upload.filename).toBe("er3.pdf");
   });
 });
